@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Notes</title>
+<style>
+  :root { --bg:#f6f7fb; --card:#fff; --ink:#1c2030; --muted:#6b7285; --brand:#4f46e5; --danger:#dc2626; --line:#e4e7f0; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  main { max-width:680px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { margin:0; font-size:28px; }
+  .sub { margin:4px 0 20px; color:var(--muted); }
+  form, li { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  label { display:block; font-weight:600; margin:10px 0 4px; }
+  input, textarea { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+  textarea { resize:vertical; }
+  button { font:inherit; border:0; border-radius:8px; padding:9px 14px; cursor:pointer; background:var(--brand); color:#fff; }
+  button.ghost { background:transparent; color:var(--ink); border:1px solid var(--line); }
+  button.danger { background:transparent; color:var(--danger); border:1px solid var(--line); }
+  #save { margin-top:12px; }
+  #error { color:var(--danger); margin:8px 0 0; font-weight:600; }
+  .toolbar { display:flex; gap:12px; align-items:center; margin:20px 0 10px; }
+  .toolbar input { flex:1; }
+  #count { color:var(--muted); white-space:nowrap; }
+  ul { list-style:none; margin:0; padding:0; display:grid; gap:12px; }
+  li h3 { margin:0 0 4px; font-size:18px; }
+  li p.body { margin:0 0 8px; white-space:pre-wrap; }
+  .meta { color:var(--muted); font-size:14px; margin-bottom:10px; }
+  .actions { display:flex; gap:8px; }
+  .summary { margin-top:12px; padding:10px 12px; background:#eef2ff; border-radius:8px; }
+  .badge { display:inline-block; margin-left:8px; padding:1px 8px; border-radius:999px; background:var(--brand); color:#fff; font-size:12px; }
+  #empty { text-align:center; color:var(--muted); padding:24px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Smart Notes</h1>
+  <p class="sub">Write notes. Get instant summaries.</p>
+
+  <form id="note-form" novalidate>
+    <label for="title">Title</label>
+    <input id="title" name="title" maxlength="80" autocomplete="off">
+    <label for="body">Note</label>
+    <textarea id="body" name="body" rows="5"></textarea>
+    <p id="error" role="alert" hidden></p>
+    <button type="submit" id="save">Save note</button>
+  </form>
+
+  <div class="toolbar">
+    <input id="search" type="search" placeholder="Search notes" aria-label="Search notes">
+    <span id="count"></span>
+  </div>
+
+  <ul id="notes"></ul>
+  <p id="empty">No notes yet</p>
+</main>
+
+<script>
+(function () {
+  var STORAGE_KEY = 'smart-notes-v1';
+  var STOP = new Set('a an the and or but if then of to in on at for with by from is are was were be been it this that these those as so not no we you they he she i our your their its'.split(' '));
+
+  function splitSentences(text) {
+    var m = text.replace(/\s+/g, ' ').trim().match(/[^.!?]+[.!?]*/g) || [];
+    return m.map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+  function words(text) { return text.toLowerCase().match(/[a-z']+/g) || []; }
+  function wordCount(text) { return text.trim().split(/\s+/).filter(Boolean).length; }
+
+  // Picks the highest-scoring sentences (by word frequency), keeps original order.
+  function summarize(text) {
+    var sentences = splitSentences(text);
+    if (sentences.length < 2) return null;
+    var freq = {};
+    words(text).forEach(function (w) { if (!STOP.has(w)) freq[w] = (freq[w] || 0) + 1; });
+    var scored = sentences.map(function (s, i) {
+      var total = words(s).reduce(function (a, w) { return a + (freq[w] || 0); }, 0);
+      return { s: s, i: i, score: total / Math.max(1, wordCount(s)) };
+    });
+    var keep = Math.max(1, Math.floor(sentences.length / 3));
+    return scored.sort(function (a, b) { return b.score - a.score; })
+      .slice(0, keep)
+      .sort(function (a, b) { return a.i - b.i; })
+      .map(function (x) { return x.s; })
+      .join(' ');
+  }
+
+  var notes = [];
+  try { notes = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch (e) { notes = []; }
+  function persist() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(notes)); } catch (e) {} }
+
+  var form = document.getElementById('note-form');
+  var titleEl = document.getElementById('title');
+  var bodyEl = document.getElementById('body');
+  var errorEl = document.getElementById('error');
+  var searchEl = document.getElementById('search');
+  var listEl = document.getElementById('notes');
+  var emptyEl = document.getElementById('empty');
+  var countEl = document.getElementById('count');
+
+  function showError(msg) { errorEl.textContent = msg; errorEl.hidden = !msg; }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  function render() {
+    var q = searchEl.value.trim().toLowerCase();
+    var shown = notes.filter(function (n) {
+      return !q || n.title.toLowerCase().indexOf(q) !== -1 || n.body.toLowerCase().indexOf(q) !== -1;
+    });
+    listEl.innerHTML = '';
+    shown.forEach(function (n) {
+      var li = el('li');
+      li.setAttribute('data-note-id', n.id);
+      li.appendChild(el('h3', 'title', n.title));
+      li.appendChild(el('p', 'body', n.body));
+      var wc = wordCount(n.body);
+      li.appendChild(el('div', 'meta', wc + (wc === 1 ? ' word' : ' words')));
+      var actions = el('div', 'actions');
+      var sBtn = el('button', 'ghost', 'Summarize');
+      sBtn.type = 'button';
+      sBtn.addEventListener('click', function () {
+        n.summary = summarize(n.body) || 'Too short to summarize. Add at least 2 sentences.';
+        persist(); render();
+      });
+      var dBtn = el('button', 'danger', 'Delete');
+      dBtn.type = 'button';
+      dBtn.addEventListener('click', function () {
+        notes = notes.filter(function (x) { return x.id !== n.id; });
+        persist(); render();
+      });
+      actions.appendChild(sBtn); actions.appendChild(dBtn);
+      li.appendChild(actions);
+      if (n.summary) {
+        var box = el('div', 'summary');
+        box.setAttribute('data-testid', 'summary');
+        box.appendChild(el('strong', null, 'Summary: '));
+        box.appendChild(document.createTextNode(n.summary));
+        box.appendChild(el('span', 'badge', 'Local'));
+        li.appendChild(box);
+      }
+      listEl.appendChild(li);
+    });
+    countEl.textContent = notes.length + (notes.length === 1 ? ' note' : ' notes');
+    if (notes.length === 0) { emptyEl.textContent = 'No notes yet'; emptyEl.hidden = false; }
+    else if (shown.length === 0) { emptyEl.textContent = 'No matching notes'; emptyEl.hidden = false; }
+    else { emptyEl.hidden = true; }
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var title = titleEl.value.trim();
+    var body = bodyEl.value.trim();
+    if (!title) { showError('Title is required'); return; }
+    if (!body) { showError('Note body is required'); return; }
+    showError('');
+    notes.unshift({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), title: title, body: body, summary: null });
+    persist();
+    titleEl.value = ''; bodyEl.value = '';
+    render();
+  });
+
+  searchEl.addEventListener('input', render);
+  render();
+
+  if (typeof module !== 'undefined') module.exports = { summarize: summarize };
+})();
+</script>
+</body>
+</html>
